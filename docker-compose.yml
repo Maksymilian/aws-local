@@ -1,0 +1,34 @@
+name: local-stack
+
+services:
+  localstack:
+    image: localstack/localstack:${LOCALSTACK_VERSION:-2026.10.0}
+    container_name: localstack
+    ports:
+      - "127.0.0.1:4566:4566"           # single edge port for every AWS service
+      - "127.0.0.1:4510-4559:4510-4559" # range used by services that expose their own ports
+    environment:
+      # Required since 2026.03.0 — the free Hobby plan is enough. See README.
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-eu-central-1}
+      DEBUG: ${DEBUG:-0}
+    volumes:
+      - ./init/ready.d:/etc/localstack/init/ready.d:ro   # provisioning scripts run on startup
+      - ./lambda:/opt/lambda:ro                          # Lambda sources deployed by the init hook
+      - localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock        # Lambda functions run as sibling containers
+    healthcheck:
+      # Healthy only once the init hooks finished provisioning without errors
+      # ("completed" is true even when a script failed, hence the second check).
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf localhost:4566/_localstack/init/ready | grep -q '"completed": true' &&
+          ! curl -sf localhost:4566/_localstack/init/ready | grep -q '"ERROR"'
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+
+volumes:
+  localstack-data:
