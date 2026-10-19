@@ -1,0 +1,31 @@
+{
+  "version": "2.0",
+  "routeKey": "GET /hello",
+  "rawPath": "/hello",
+  "rawQueryString": "name=Ada",
+  "headers": {
+    "user-agent": "curl/8.0"
+  },
+  "queryStringParameters": {
+    "name": "Ada"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "local",
+    "domainName": "localhost",
+    "domainPrefix": "localhost",
+    "http": {
+      "method": "GET",
+      "path": "/hello",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "curl/8.0"
+    },
+    "requestId": "c6af9ac6-7b61-11e6-9a41-93e8deadbeef",
+    "routeKey": "GET /hello",
+    "stage": "$default",
+    "time": "19/Oct/2026:10:00:00 +0000",
+    "timeEpoch": 1792404000000
+  },
+  "isBase64Encoded": false
+}

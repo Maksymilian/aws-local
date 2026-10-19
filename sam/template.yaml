@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Self-contained Lambda functions meant to be run and tested with the SAM CLI alone
+  (sam local invoke / start-api / start-lambda). They call no other AWS service, so
+  they need neither LocalStack nor an AWS account. See test.sh.
+
+Parameters:
+  MaxOrderTotal:
+    Type: Number
+    Default: 10000
+    Description: Orders with a higher total are rejected. Try --parameter-overrides MaxOrderTotal=50.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    CodeUri: src/            # one code directory, so the functions can share validation.py
+    Timeout: 10
+    MemorySize: 128
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO      # env.json raises it to DEBUG for local runs
+
+Resources:
+  # GET /hello?name=Ada
+  HelloFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: hello.handler
+      Events:
+        Hello:
+          Type: HttpApi
+          Properties:
+            Path: /hello
+            Method: GET
+
+  # POST /orders with a JSON order, answers 201 or 400
+  CreateOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: create_order.handler
+      Environment:
+        Variables:
+          MAX_ORDER_TOTAL: !Ref MaxOrderTotal
+      Events:
+        CreateOrder:
+          Type: HttpApi
+          Properties:
+            Path: /orders
+            Method: POST
+
+  # Consumes orders from SQS and reports the bad messages back as partial batch failures
+  QueueWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: queue_worker.handler
+      Environment:
+        Variables:
+          MAX_ORDER_TOTAL: !Ref MaxOrderTotal
+      Events:
+        Orders:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrdersQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  # Only matters for `sam deploy`. Locally the SQS event comes from events/sqs-orders.json.
+  OrdersQueue:
+    Type: AWS::SQS::Queue

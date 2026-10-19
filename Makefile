@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 EXAMPLES := $(sort $(wildcard examples/0*.sh))
 
-.PHONY: help up down restart logs status examples java
+.PHONY: help up down restart logs status examples java sam-test sam-api
 
 help: ## Show available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
@@ -26,3 +26,9 @@ examples: ## Run every example script in order
 
 java: ## Run the Java SDK client against LocalStack
 	cd java-client && mvn -q compile exec:java
+
+sam-test: ## Test the functions in sam/ with only the SAM CLI and Docker
+	sam/test.sh
+
+sam-api: ## Serve the HTTP API of sam/ on localhost:3300
+	cd sam && sam local start-api

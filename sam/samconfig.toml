@@ -1,0 +1,17 @@
+# Defaults for `sam` commands run from this directory, so `sam local invoke HelloFunction -e
+# events/hello.json` needs no extra flags. Command-line flags still override these.
+version = 0.1
+
+[default.global.parameters]
+region = "eu-central-1"
+
+[default.local_invoke.parameters]
+env_vars = "env.json"
+
+[default.local_start_api.parameters]
+env_vars = "env.json"
+port = 3300                # 3000 is SAM's default but is often taken (Grafana, React dev servers, ...)
+
+[default.local_start_lambda.parameters]
+env_vars = "env.json"
+port = 3301

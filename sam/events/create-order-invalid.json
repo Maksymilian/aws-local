@@ -1,0 +1,30 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /orders",
+  "rawPath": "/orders",
+  "rawQueryString": "",
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "curl/8.0"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "local",
+    "domainName": "localhost",
+    "domainPrefix": "localhost",
+    "http": {
+      "method": "POST",
+      "path": "/orders",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "curl/8.0"
+    },
+    "requestId": "c6af9ac6-7b61-11e6-9a41-93e8deadbeef",
+    "routeKey": "POST /orders",
+    "stage": "$default",
+    "time": "19/Oct/2026:10:00:00 +0000",
+    "timeEpoch": 1792404000000
+  },
+  "body": "{\"orderId\": \"\", \"customerId\": \"c-bob\", \"total\": -5, \"items\": [{\"sku\": \"MUG-7\", \"qty\": 0}]}",
+  "isBase64Encoded": false
+}

@@ -9,6 +9,7 @@ plus runnable examples for each service and a Java SDK client.
 - Docker with Compose v2
 - AWS CLI v2 and `jq` (for the example scripts)
 - Java 17+ and Maven (only for `java-client/`)
+- [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) (only for `sam/`, which needs neither LocalStack nor the token)
 - A **LocalStack auth token** (free, see below)
 
 ### About the auth token
@@ -82,6 +83,68 @@ Each script is standalone and safe to re-run:
 | `examples/06-eventbridge.sh`      | content-based routing on a custom event bus                             |
 | `examples/07-lambda-pipeline.sh`  | S3 upload → Lambda → DynamoDB + SNS → SQS, Lambda logs, direct invoke   |
 | `java-client/`                    | S3, SQS, DynamoDB, Secrets Manager and SSM through the Java SDK v2      |
+
+## Testing Lambdas with the SAM CLI only
+
+`lambda/order_processor` needs S3, DynamoDB and SNS, so it runs inside LocalStack. The functions
+in `sam/` call no other AWS service, so the SAM CLI and Docker are all they need: no LocalStack,
+no auth token, no AWS account. SAM runs each one in the official Lambda runtime image (pulled on
+first use), the same environment it gets in AWS.
+
+| Function              | Trigger in `sam/template.yaml`     | Does                                                                      |
+|-----------------------|------------------------------------|---------------------------------------------------------------------------|
+| `HelloFunction`       | HTTP API `GET /hello`              | greets `?name=`                                                           |
+| `CreateOrderFunction` | HTTP API `POST /orders`            | validates the order JSON, answers `201`, or `400` listing every problem   |
+| `QueueWorkerFunction` | SQS with `ReportBatchItemFailures` | validates each message, returns only the bad ones as `batchItemFailures`  |
+
+The order functions share `src/validation.py`. All functions use the same `CodeUri`, so no layer
+is needed for that.
+
+```bash
+make sam-test   # sam/test.sh: validate the template, invoke every function, curl the HTTP API
+```
+
+Or run the commands yourself from `sam/`, where `samconfig.toml` supplies the region, ports and `env.json`:
+
+```bash
+cd sam
+
+# Invoke once with a saved event. The return value goes to stdout, the logs to stderr.
+sam local invoke HelloFunction -e events/hello.json
+sam local invoke QueueWorkerFunction -e events/sqs-orders.json
+
+# Override a template parameter for one run: the 89.90 order is now over the limit.
+sam local invoke CreateOrderFunction -e events/create-order.json --parameter-overrides MaxOrderTotal=50
+
+# Generate an event instead of writing one, and pipe it in.
+sam local generate-event apigateway http-api-proxy --method POST --path /orders \
+  --body '{"orderId": "o-1", "customerId": "c-1", "total": 5, "items": [{"sku": "A", "qty": 1}]}' \
+  | sam local invoke CreateOrderFunction -e -
+
+# Serve the HTTP API on localhost:3300 (also `make sam-api`). Code edits apply on the next request.
+sam local start-api
+curl 'localhost:3300/hello?name=Ada'
+curl localhost:3300/orders -H 'Content-Type: application/json' \
+  -d '{"orderId": "o-1", "customerId": "c-1", "total": 5, "items": [{"sku": "A", "qty": 1}]}'
+
+# Emulate the Lambda API on localhost:3301, for tests that invoke functions through an SDK or the
+# AWS CLI. Any credentials work, e.g. AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test.
+sam local start-lambda
+aws lambda invoke --endpoint-url http://127.0.0.1:3301 --region eu-central-1 \
+  --function-name QueueWorkerFunction --cli-binary-format raw-in-base64-out \
+  --payload file://events/sqs-orders.json out.json
+```
+
+Good to know:
+
+- `env.json` raises `LOG_LEVEL` to `DEBUG`, so locally every function logs the event it received.
+  It can only override variables the template declares.
+- No `sam build` is needed: the functions have no dependencies, so `sam local` runs `src/` directly.
+  Once you add a `requirements.txt` you have to run `sam build`. After that, `sam local` uses
+  `.aws-sam/build` and won't see source edits until you build again.
+- `sam local generate-event sqs receive-message --body ...` inserts the body into its JSON
+  without escaping it, so escape the quotes: `--body '{\"orderId\": \"o-1\"}'`.
+- Port 3300 taken? Use `SAM_API_PORT=3400 make sam-test` or `sam local start-api --port 3400`.
 
 ## Using it from your own project
 

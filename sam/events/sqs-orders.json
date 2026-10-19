@@ -1,0 +1,52 @@
+{
+  "Records": [
+    {
+      "messageId": "msg-ok-1",
+      "receiptHandle": "MessageReceiptHandle",
+      "body": "{\"orderId\": \"o-2001\", \"customerId\": \"c-alice\", \"total\": 12.50, \"items\": [{\"sku\": \"PEN-1\", \"qty\": 5}]}",
+      "attributes": {
+        "ApproximateReceiveCount": "1",
+        "SentTimestamp": "1523232000000",
+        "SenderId": "123456789012",
+        "ApproximateFirstReceiveTimestamp": "1523232000001"
+      },
+      "messageAttributes": {},
+      "md5OfBody": "efb755dc1c367ebbd6ef6fff9205b235",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:eu-central-1:123456789012:OrdersQueue",
+      "awsRegion": "eu-central-1"
+    },
+    {
+      "messageId": "msg-bad-json",
+      "receiptHandle": "MessageReceiptHandle",
+      "body": "{\"orderId\": \"o-2002\", ",
+      "attributes": {
+        "ApproximateReceiveCount": "1",
+        "SentTimestamp": "1523232000000",
+        "SenderId": "123456789012",
+        "ApproximateFirstReceiveTimestamp": "1523232000001"
+      },
+      "messageAttributes": {},
+      "md5OfBody": "a70d6a8fff5d650ea082028e76f50039",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:eu-central-1:123456789012:OrdersQueue",
+      "awsRegion": "eu-central-1"
+    },
+    {
+      "messageId": "msg-bad-order",
+      "receiptHandle": "MessageReceiptHandle",
+      "body": "{\"orderId\": \"o-2003\", \"customerId\": \"c-bob\", \"total\": 30, \"items\": []}",
+      "attributes": {
+        "ApproximateReceiveCount": "1",
+        "SentTimestamp": "1523232000000",
+        "SenderId": "123456789012",
+        "ApproximateFirstReceiveTimestamp": "1523232000001"
+      },
+      "messageAttributes": {},
+      "md5OfBody": "88be373989c8b97a2d7b128a9253cadd",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:eu-central-1:123456789012:OrdersQueue",
+      "awsRegion": "eu-central-1"
+    }
+  ]
+}

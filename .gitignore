@@ -30,3 +30,7 @@ replay_pid*
 target/
 
 .idea/
+
+# AWS SAM build output and Python bytecode
+.aws-sam/
+__pycache__/
