@@ -11,6 +11,11 @@ Parameters:
   OrdersTableName:
     Type: String
     Default: orders-local
+  AuthSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: HMAC key for API tokens. Locally set in samconfig.toml/env.json; no default, so a deploy must pass a real secret.
 
 Globals:
   Function:
@@ -32,6 +37,35 @@ Resources:
     Type: AWS::Serverless::Api   # REST API (API Gateway v1)
     Properties:
       StageName: local
+      Auth:
+        # Every route requires "Authorization: Bearer <token>"; the verified
+        # customerId reaches the orders Lambda as requestContext.authorizer.customerId.
+        DefaultAuthorizer: OrdersTokenAuthorizer
+        Authorizers:
+          OrdersTokenAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Header: Authorization
+              ReauthorizeEvery: 300   # cache the decision per token for 5 minutes
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: authorizer.handler
+      MemorySize: 256
+      Timeout: 5
+      Environment:
+        Variables:
+          AUTH_SECRET: !Ref AuthSecret
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: esm
+        OutExtension: [.js=.mjs]
+        Target: es2022
+        Minify: true
+        Sourcemap: false
+        EntryPoints: [src/authorizer.js]
 
   OrderFunction:
     Type: AWS::Serverless::Function

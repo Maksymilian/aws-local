@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -147,12 +150,26 @@ func (r *runner) apiFlow() error {
 	defer stop()
 	fmt.Printf("local API Gateway on %s (log: .start-api.log)\n", api)
 
-	// post sends body and fails the run unless the response has the expected
-	// HTTP status and "result" field.
-	post := func(path, body string, wantStatus int, wantResult string) func() error {
+	// post sends body as the customer `as` ("" = no Authorization header) and
+	// fails the run unless the response has the expected HTTP status and "result".
+	post := func(as, path, body string, wantStatus int, wantResult string) func() error {
 		return func() error {
-			fmt.Printf("$ curl -X POST %s%s -d '%s'\n", api, path, body)
-			resp, err := http.Post(api+path, "application/json", strings.NewReader(body))
+			req, err := http.NewRequest(http.MethodPost, api+path, strings.NewReader(body))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			auth := "(no token)"
+			if as != "" {
+				token, err := makeToken(as)
+				if err != nil {
+					return err
+				}
+				req.Header.Set("Authorization", "Bearer "+token)
+				auth = "token for " + as
+			}
+			fmt.Printf("$ curl -X POST %s%s [%s] -d '%s'\n", api, path, auth, body)
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				return err
 			}
@@ -172,22 +189,24 @@ func (r *runner) apiFlow() error {
 	}
 
 	// Same input as the EventBridge flow: the body is the event's "detail".
+	// Event-file steps act as the customer named in the event (cust-001 when it
+	// names none), so the token always matches the body.
 	create := func(file string, wantStatus int, wantResult string) func() error {
 		return func() error {
-			body, _, err := eventDetail(file)
+			body, d, err := eventDetail(file)
 			if err != nil {
 				return err
 			}
-			return post("/orders", body, wantStatus, wantResult)()
+			return post(d.caller(), "/orders", body, wantStatus, wantResult)()
 		}
 	}
 	cancel := func(file string, wantStatus int, wantResult string) func() error {
 		return func() error {
-			body, orderID, err := eventDetail(file)
+			body, d, err := eventDetail(file)
 			if err != nil {
 				return err
 			}
-			return post("/orders/"+orderID+"/cancel", body, wantStatus, wantResult)()
+			return post(d.caller(), "/orders/"+d.OrderID+"/cancel", body, wantStatus, wantResult)()
 		}
 	}
 
@@ -202,14 +221,16 @@ func (r *runner) apiFlow() error {
 		{"Same create twice: resend idempotencyKey 1 -> 200 duplicate", create("01-create-order.json", 200, "duplicate")},
 		{"Same orderId, new idempotencyKey 4 -> 409 conflict", create("05-create-order-conflict.json", 409, "conflict")},
 		{"Missing orderId -> 400 invalid", create("06-missing-order-id.json", 400, "invalid")},
-		{"Missing customerId -> 400 invalid", create("07-missing-customer-id.json", 400, "invalid")},
-		// REST-only case (needs a different customer than any event file)
-		{"Cancel by another customer -> 403 forbidden", post("/orders/order-001/cancel", `{"idempotencyKey":7,"orderId":"order-001","customerId":"cust-999"}`, 403, "forbidden")},
+		{"No customerId in body -> taken from the token, 201 created (order-003)", create("07-missing-customer-id.json", 201, "created")},
+		// Authentication (REST only)
+		{"No token -> 401 from the authorizer", post("", "/orders/order-001/cancel", `{"idempotencyKey":7}`, 401, "")},
+		{"cust-999 cancels cust-001's order -> 403 forbidden", post("cust-999", "/orders/order-001/cancel", `{"idempotencyKey":7}`, 403, "forbidden")},
+		{"cust-999 claims to be cust-001 in the body -> 403 forbidden", post("cust-999", "/orders/order-001/cancel", `{"idempotencyKey":7,"customerId":"cust-001"}`, 403, "forbidden")},
 		{"Cancel order-001 (idempotencyKey 2) -> 200 cancelled", cancel("02-cancel-order.json", 200, "cancelled")},
 		{"Check DynamoDB: order-001 kept, status CANCELLED", showTable},
 		{"Cancel again -> 200 already_cancelled", cancel("02-cancel-order.json", 200, "already_cancelled")},
 		{"Create cancelled order-001 again (idempotencyKey 3) -> 409 discarded", create("03-create-order-again.json", 409, "discarded")},
-		{"Check DynamoDB: order-001 still CANCELLED", showTable},
+		{"Check DynamoDB: order-001 still CANCELLED, order-003 CREATED", showTable},
 		{"Remove everything", func() error {
 			if err := cleanTable(); err != nil {
 				return err
@@ -268,25 +289,57 @@ func startAPI(port int) (func(), error) {
 	return nil, fmt.Errorf("sam local start-api did not start within 3 minutes")
 }
 
-// eventDetail returns the "detail" of events/<file> as compact JSON, plus its orderId.
-func eventDetail(file string) (string, string, error) {
+type detailIDs struct {
+	OrderID    string `json:"orderId"`
+	CustomerID string `json:"customerId"`
+}
+
+func (d detailIDs) caller() string {
+	if d.CustomerID != "" {
+		return d.CustomerID
+	}
+	return "cust-001"
+}
+
+// eventDetail returns the "detail" of events/<file> as compact JSON, plus its IDs.
+func eventDetail(file string) (string, detailIDs, error) {
+	var d detailIDs
 	raw, err := os.ReadFile(filepath.Join("events", file))
 	if err != nil {
-		return "", "", err
+		return "", d, err
 	}
 	var ev struct {
 		Detail json.RawMessage `json:"detail"`
 	}
 	if err := json.Unmarshal(raw, &ev); err != nil {
-		return "", "", fmt.Errorf("%s: %w", file, err)
-	}
-	var d struct {
-		OrderID string `json:"orderId"`
+		return "", d, fmt.Errorf("%s: %w", file, err)
 	}
 	_ = json.Unmarshal(ev.Detail, &d)
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, ev.Detail); err != nil {
-		return "", "", err
+		return "", d, err
 	}
-	return buf.String(), d.OrderID, nil
+	return buf.String(), d, nil
+}
+
+// makeToken builds the same token src/authorizer.js verifies, signed with the
+// local AUTH_SECRET from env.json and valid for one hour.
+func makeToken(customerID string) (string, error) {
+	raw, err := os.ReadFile("env.json")
+	if err != nil {
+		return "", err
+	}
+	var env struct {
+		Parameters struct {
+			AuthSecret string `json:"AUTH_SECRET"`
+		}
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Parameters.AuthSecret == "" {
+		return "", fmt.Errorf("env.json: Parameters.AUTH_SECRET missing")
+	}
+	claims, _ := json.Marshal(map[string]any{"sub": customerID, "exp": time.Now().Add(time.Hour).Unix()})
+	payload := base64.RawURLEncoding.EncodeToString(claims)
+	mac := hmac.New(sha256.New, []byte(env.Parameters.AuthSecret))
+	mac.Write([]byte(payload))
+	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }

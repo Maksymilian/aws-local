@@ -3,7 +3,7 @@ version = 0.1
 
 [default.global.parameters]
 region = "eu-central-1"
-parameter_overrides = "Architecture=x86_64"
+parameter_overrides = "Architecture=x86_64 AuthSecret=local-dev-secret-not-for-production"
 
 [default.local_invoke.parameters]
 env_vars = "env.json"

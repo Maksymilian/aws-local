@@ -1,5 +1,5 @@
 import { match } from "ts-pattern";
-import { isApiGateway, RouteNotFoundError, toCommand } from "./events/parse.js";
+import { ForbiddenError, isApiGateway, RouteNotFoundError, toCommand, UnauthorizedError } from "./events/parse.js";
 import { createOrder } from "./events/create-order.js";
 import { cancelOrder } from "./events/cancel-order.js";
 import { ValidationError } from "./lib/validation.js";
@@ -31,6 +31,14 @@ export const handler = async (event, context) => {
     if (err instanceof ValidationError) {
       logger.warn("validation failed", { errors: err.errors });
       return respond(event, { statusCode: 400, body: { result: "invalid", errors: err.errors } });
+    }
+    if (err instanceof UnauthorizedError) {
+      logger.warn("request without authenticated customer");
+      return respond(event, { statusCode: 401, body: { result: "unauthorized", message: err.message } });
+    }
+    if (err instanceof ForbiddenError) {
+      logger.warn("forbidden", { message: err.message });
+      return respond(event, { statusCode: 403, body: { result: "forbidden", message: err.message } });
     }
     if (err instanceof RouteNotFoundError) {
       logger.warn(err.message);

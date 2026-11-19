@@ -12,6 +12,36 @@ export class RouteNotFoundError extends Error {
   }
 }
 
+/** No authenticated identity on a REST request (authorizer missing or misconfigured). */
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("Unauthorized");
+    this.name = "UnauthorizedError";
+  }
+}
+
+/** The body names a different customer than the authenticated caller. */
+export class ForbiddenError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ForbiddenError";
+  }
+}
+
+/**
+ * REST requests act as the customer the authorizer verified
+ * (requestContext.authorizer.customerId), never as the customerId in the body.
+ * A body customerId is optional; if present it must match the caller.
+ */
+function asAuthenticatedCustomer(e, body) {
+  const customerId = e.requestContext?.authorizer?.customerId;
+  if (typeof customerId !== "string" || customerId === "") throw new UnauthorizedError();
+  if (body.customerId !== undefined && body.customerId !== customerId) {
+    throw new ForbiddenError("customerId does not match the authenticated caller");
+  }
+  return { ...body, customerId };
+}
+
 export const isApiGateway = (e) =>
   typeof e === "object" && e !== null && "requestContext" in e && "httpMethod" in e;
 
@@ -32,6 +62,7 @@ function jsonBody(e) {
  *   REST API:     POST /orders                    -> CreateOrder
  *                 POST /orders/{orderId}/cancel   -> CancelOrder
  * The payload is validated here, so the business logic only sees checked data.
+ * REST requests carry the caller's customerId from the authorizer (see asAuthenticatedCustomer).
  * @returns {{ command: OrderCommand, meta: InvocationMetadata }}
  */
 export function toCommand(event, context) {
@@ -44,14 +75,14 @@ export function toCommand(event, context) {
     // ---- API Gateway REST ----
     .with({ httpMethod: "POST", resource: "/orders" }, (e) => ({
       type: "CreateOrder",
-      detail: validateCreate(jsonBody(e)),
+      detail: validateCreate(asAuthenticatedCustomer(e, jsonBody(e))),
     }))
     .with(
       { httpMethod: "POST", resource: "/orders/{orderId}/cancel", pathParameters: { orderId: P.string } },
       (e) => ({
         type: "CancelOrder",
         // orderId comes from the URL; a different one in the body is ignored.
-        detail: validateCancel({ ...jsonBody(e), orderId: e.pathParameters.orderId }),
+        detail: validateCancel({ ...asAuthenticatedCustomer(e, jsonBody(e)), orderId: e.pathParameters.orderId }),
       }),
     )
     .otherwise((e) => {
