@@ -110,7 +110,8 @@ REST API     POST /orders                          ─┤        (one handler,  
   | same order, new `idempotencyKey` | `409 conflict` |
   | cancel | `200 cancelled`: the item stays, with `status: CANCELLED` |
   | cancel again | `200 already_cancelled` |
-  | create an order that was cancelled | `409 discarded` |
+  | create an order that was cancelled, new `idempotencyKey` | `409 discarded` |
+  | create an order that was cancelled, its original `idempotencyKey` (a retry) | `200 duplicate` |
   | invalid payload | `400 invalid` |
   | someone else's order | `403 forbidden` |
 
