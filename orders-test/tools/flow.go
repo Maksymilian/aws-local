@@ -147,7 +147,9 @@ func (r *runner) apiFlow() error {
 	defer stop()
 	fmt.Printf("local API Gateway on %s (log: .start-api.log)\n", api)
 
-	post := func(path, body string) func() error {
+	// post sends body and fails the run unless the response has the expected
+	// HTTP status and "result" field.
+	post := func(path, body string, wantStatus int, wantResult string) func() error {
 		return func() error {
 			fmt.Printf("$ curl -X POST %s%s -d '%s'\n", api, path, body)
 			resp, err := http.Post(api+path, "application/json", strings.NewReader(body))
@@ -157,27 +159,35 @@ func (r *runner) apiFlow() error {
 			defer resp.Body.Close()
 			b, _ := io.ReadAll(resp.Body)
 			fmt.Printf("%s\n  HTTP %d\n\n", b, resp.StatusCode)
+			var got struct {
+				Result string `json:"result"`
+			}
+			_ = json.Unmarshal(b, &got)
+			if resp.StatusCode != wantStatus || got.Result != wantResult {
+				return fmt.Errorf("POST %s: want HTTP %d %q, got HTTP %d %q",
+					path, wantStatus, wantResult, resp.StatusCode, got.Result)
+			}
 			return nil
 		}
 	}
 
 	// Same input as the EventBridge flow: the body is the event's "detail".
-	create := func(file string) func() error {
+	create := func(file string, wantStatus int, wantResult string) func() error {
 		return func() error {
 			body, _, err := eventDetail(file)
 			if err != nil {
 				return err
 			}
-			return post("/orders", body)()
+			return post("/orders", body, wantStatus, wantResult)()
 		}
 	}
-	cancel := func(file string) func() error {
+	cancel := func(file string, wantStatus int, wantResult string) func() error {
 		return func() error {
 			body, orderID, err := eventDetail(file)
 			if err != nil {
 				return err
 			}
-			return post("/orders/"+orderID+"/cancel", body)()
+			return post("/orders/"+orderID+"/cancel", body, wantStatus, wantResult)()
 		}
 	}
 
@@ -185,19 +195,21 @@ func (r *runner) apiFlow() error {
 		title string
 		run   func() error
 	}{
-		{"Create order-001 (idempotencyKey 1)", create("01-create-order.json")},
+		// Ordered so each outcome is really reached: duplicate and conflict need an
+		// active order, discarded needs a cancelled one.
+		{"Create order-001 (idempotencyKey 1) -> 201 created", create("01-create-order.json", 201, "created")},
 		{"Check DynamoDB: order-001 exists, clientIp is stored", showTable},
-		{"Cancel order-001 (idempotencyKey 2)", cancel("02-cancel-order.json")},
-		{"Check DynamoDB: order-001 kept, status CANCELLED", showTable},
-		{"Create cancelled order-001 again (idempotencyKey 3) -> discarded", create("03-create-order-again.json")},
-		{"Check DynamoDB: order-001 still CANCELLED", showTable},
-		{"Same create twice: resend idempotencyKey 3", create("04-create-order-duplicate.json")},
-		{"Same orderId, new idempotencyKey 4 -> 409", create("05-create-order-conflict.json")},
-		{"Missing orderId -> 400", create("06-missing-order-id.json")},
-		{"Missing customerId -> 400", create("07-missing-customer-id.json")},
+		{"Same create twice: resend idempotencyKey 1 -> 200 duplicate", create("01-create-order.json", 200, "duplicate")},
+		{"Same orderId, new idempotencyKey 4 -> 409 conflict", create("05-create-order-conflict.json", 409, "conflict")},
+		{"Missing orderId -> 400 invalid", create("06-missing-order-id.json", 400, "invalid")},
+		{"Missing customerId -> 400 invalid", create("07-missing-customer-id.json", 400, "invalid")},
 		// REST-only case (needs a different customer than any event file)
-		{"Cancel by another customer -> 403", post("/orders/order-001/cancel", `{"idempotencyKey":7,"orderId":"order-001","customerId":"cust-999"}`)},
-		{"Check DynamoDB: still exactly one order", showTable},
+		{"Cancel by another customer -> 403 forbidden", post("/orders/order-001/cancel", `{"idempotencyKey":7,"orderId":"order-001","customerId":"cust-999"}`, 403, "forbidden")},
+		{"Cancel order-001 (idempotencyKey 2) -> 200 cancelled", cancel("02-cancel-order.json", 200, "cancelled")},
+		{"Check DynamoDB: order-001 kept, status CANCELLED", showTable},
+		{"Cancel again -> 200 already_cancelled", cancel("02-cancel-order.json", 200, "already_cancelled")},
+		{"Create cancelled order-001 again (idempotencyKey 3) -> 409 discarded", create("03-create-order-again.json", 409, "discarded")},
+		{"Check DynamoDB: order-001 still CANCELLED", showTable},
 		{"Remove everything", func() error {
 			if err := cleanTable(); err != nil {
 				return err
