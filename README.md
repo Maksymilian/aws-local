@@ -147,9 +147,14 @@ Good to know:
 
 - Your AWS profile is not used: the Go runner and the scripts pass dummy credentials, so an
   expired SSO session doesn't get in the way. By hand, `export AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local; unset AWS_PROFILE`.
-- `samconfig.toml` sets the local defaults: region, `env.json`, the `lambda-test` Docker network
-  (so the Lambda reaches `dynamodb-local:8000`), port 3050 and an x86_64 build. In AWS the
-  functions run on arm64, and `AuthSecret` has no default, so a deploy must pass a real secret.
+- `samconfig.toml` holds **local-only** defaults: region, `env.json`, the `lambda-test` Docker
+  network (so the Lambda reaches `dynamodb-local:8000`), port 3050, an x86_64 build and a public
+  development `AuthSecret`. The secret and the architecture are set only for `sam build`,
+  `sam local invoke` and `sam local start-api`, not in `[default.global.parameters]`, so
+  `sam deploy` never picks them up.
+- Deploying: the template has no default for `AuthSecret`, so pass a secure secret explicitly,
+  e.g. `sam deploy --parameter-overrides AuthSecret=<value from Secrets Manager>`. Never reuse the
+  development secret. Without the local override the functions build for arm64.
 - `env.json` can only override variables that `template.yaml` declares.
 - `./generate-events.sh` rewrites `events/*.json` from `sam local generate-event`.
 - Locally, `sam local start-api` fills in placeholders: user agent `Custom User Agent String`,
