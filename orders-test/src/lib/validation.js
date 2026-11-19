@@ -29,6 +29,16 @@ function checkId(p, field, errors) {
   }
 }
 
+/**
+ * True when n has at most 2 decimal places. Exact `n * 100 === Math.round(n * 100)`
+ * fails for values like 0.29 (0.29 * 100 = 28.999999999999996), so the check
+ * allows a tiny floating-point error; real extra digits (0.291 -> 29.1) are far larger.
+ */
+export function hasAtMostTwoDecimals(n) {
+  const cents = n * 100;
+  return Math.abs(cents - Math.round(cents)) < 1e-6;
+}
+
 function asObject(input) {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new ValidationError(["payload must be a JSON object"]);
@@ -46,7 +56,7 @@ export function validateCreate(input) {
   const a = p.amount;
   if (typeof a !== "number" || !Number.isFinite(a) || a <= 0) {
     errors.push("amount must be a positive number");
-  } else if (Math.round(a * 100) !== a * 100) {
+  } else if (!hasAtMostTwoDecimals(a)) {
     errors.push("amount must have at most 2 decimal places");
   }
   if (errors.length) throw new ValidationError(errors);

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "PATH=\"$PWD/node_modules/.bin:$PATH\" sam build",
-    "check": "node --check src/handler.js"
+    "check": "node --check src/handler.js",
+    "test": "node --test 'src/**/*.test.js'"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.700.0",
