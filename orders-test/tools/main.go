@@ -2,6 +2,8 @@
 // Simple table/event helpers are Bash scripts next to template.yaml:
 // generate-events.sh, clean-table.sh, show-table.sh.
 //
+// Run from orders-test/ (go.work there points at ./tools):
+//
 //	go run ./tools test eventbridge [-step]
 //	go run ./tools test api         [-step] [-port 3050]
 package main

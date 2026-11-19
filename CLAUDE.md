@@ -6,7 +6,8 @@
     clear a table, print a table) are plain Bash `.sh` files.
   - Anything with real logic (test runners, process management, parsing,
     branching flows) is written in Go, in a Go module (e.g. `orders-test/tools`,
-    run with `go run ./tools <command>`). Go code may call the `.sh` scripts.
+    run from that folder's parent with `go run ./tools <command>`, enabled
+    by a `go.work` that uses `./tools`). Go code may call the `.sh` scripts.
   - No Python or Node scripts.
   - Files a third-party tool requires to be shell (e.g. LocalStack
     `init/ready.d/*.sh` hooks) stay shell regardless.
