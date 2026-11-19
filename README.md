@@ -1,16 +1,22 @@
-# local-stack
+# aws-local
 
-A ready-to-use [LocalStack](https://localstack.cloud) setup on Docker Compose: AWS services
-on `localhost:4566`, provisioned on startup with the resources of a small "orders" app,
-plus runnable examples for each service and a Java SDK client.
+Run and test AWS services locally, with no AWS account:
+
+- **LocalStack** on Docker Compose: AWS services on `localhost:4566`, provisioned on startup
+  with the resources of a small "orders" app, plus runnable examples for each service and a
+  Java SDK client.
+- **`orders-test/`**: an orders Lambda (JavaScript) tested with the SAM CLI and DynamoDB Local,
+  triggered both by EventBridge events and by a REST API behind API Gateway.
 
 ## Requirements
 
 - Docker with Compose v2
 - AWS CLI v2 and `jq` (for the example scripts)
 - Java 17+ and Maven (only for `java-client/`)
-- [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html) (only for `sam/`, which needs neither LocalStack nor the token)
 - A **LocalStack auth token** (free, see below)
+- For `orders-test/` only (it needs neither LocalStack nor the token):
+  [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html),
+  Node.js 22+, Go 1.24+, `jq` and `openssl`
 
 ### About the auth token
 
@@ -43,24 +49,20 @@ container only reports *healthy* after the script succeeds, so `make up` (which 
 `docker compose up --wait`) returns once the resources below exist.
 
 ```
-S3 demo-bucket/incoming/*.json ──▶ Lambda order-processor ──▶ DynamoDB orders
-                                             │
-                                             ▼
-                                  SNS order-events ──▶ SQS billing-queue  (all events)
-                                                  └──▶ SQS shipping-queue (OrderPlaced only)
+SNS order-events ──▶ SQS billing-queue  (all events)
+                └──▶ SQS shipping-queue (OrderPlaced only)
 
 SQS orders-queue ──(2 failed receives)──▶ SQS orders-dlq
 EventBridge demo-bus ──(rule: total >= 100)──▶ SQS order-audit-queue
-Secrets Manager demo/db-credentials · SSM /demo/config/*
+S3 demo-bucket · DynamoDB orders · Secrets Manager demo/db-credentials · SSM /demo/config/*
 ```
 
 | Service         | Resource                                    | Notes                                                         |
 |-----------------|---------------------------------------------|---------------------------------------------------------------|
-| S3              | `demo-bucket`                               | `incoming/*.json` uploads trigger the Lambda                  |
+| S3              | `demo-bucket`                               |                                                               |
 | SQS             | `orders-queue`, `orders-dlq`                | redrive policy, `maxReceiveCount = 2`                         |
 | SNS             | `order-events`                              | fans out to `billing-queue` and `shipping-queue` (filtered)   |
 | DynamoDB        | `orders` (PK `orderId`)                     | GSI `customerId-index`                                        |
-| Lambda          | `order-processor` (Python 3.13)             | source in `lambda/order_processor/handler.py`                 |
 | EventBridge     | bus `demo-bus`, rule `high-value-orders`    | numeric content filter, targets `order-audit-queue`           |
 | Secrets Manager | `demo/db-credentials`                       | JSON secret                                                   |
 | SSM             | `/demo/config/{page-size,new-checkout-enabled,api-key}` | `api-key` is a `SecureString`                     |
@@ -81,70 +83,77 @@ Each script is standalone and safe to re-run:
 | `examples/04-dynamodb.sh`         | put/get, GSI query, conditional update (optimistic locking)             |
 | `examples/05-config-secrets.sh`   | read/rotate a secret, load a parameter tree, flip a feature flag        |
 | `examples/06-eventbridge.sh`      | content-based routing on a custom event bus                             |
-| `examples/07-lambda-pipeline.sh`  | S3 upload → Lambda → DynamoDB + SNS → SQS, Lambda logs, direct invoke   |
 | `java-client/`                    | S3, SQS, DynamoDB, Secrets Manager and SSM through the Java SDK v2      |
 
-## Testing Lambdas with the SAM CLI only
+## orders-test: a Lambda tested locally with SAM
 
-`lambda/order_processor` needs S3, DynamoDB and SNS, so it runs inside LocalStack. The functions
-in `sam/` call no other AWS service, so the SAM CLI and Docker are all they need: no LocalStack,
-no auth token, no AWS account. SAM runs each one in the official Lambda runtime image (pulled on
-first use), the same environment it gets in AWS.
+`orders-test/` needs no LocalStack, no auth token and no AWS account: the SAM CLI runs the
+Lambda in the official runtime image, and DynamoDB Local stores the orders.
 
-| Function              | Trigger in `sam/template.yaml`     | Does                                                                      |
-|-----------------------|------------------------------------|---------------------------------------------------------------------------|
-| `HelloFunction`       | HTTP API `GET /hello`              | greets `?name=`                                                           |
-| `CreateOrderFunction` | HTTP API `POST /orders`            | validates the order JSON, answers `201`, or `400` listing every problem   |
-| `QueueWorkerFunction` | SQS with `ReportBatchItemFailures` | validates each message, returns only the bad ones as `batchItemFailures`  |
-
-The order functions share `src/validation.py`. All functions use the same `CodeUri`, so no layer
-is needed for that.
-
-```bash
-make sam-test   # sam/test.sh: validate the template, invoke every function, curl the HTTP API
+```
+EventBridge  detail-type CreateOrder | CancelOrder ─┐
+                                                    ├──▶ Lambda OrderFunction ──▶ DynamoDB orders-local
+REST API     POST /orders                          ─┤        (one handler,        (DynamoDB Local,
+             POST /orders/{orderId}/cancel         ─┘    pattern matching)          port 8000)
+             └── Lambda authorizer (Bearer token)
 ```
 
-Or run the commands yourself from `sam/`, where `samconfig.toml` supplies the region, ports and `env.json`:
+- **One handler** (`src/handler.js`) for both triggers and both commands, routed with
+  [ts-pattern](https://github.com/gvergnaud/ts-pattern). EventBridge `detail` and the REST body
+  carry the same payload: `{"idempotencyKey": 1, "orderId": "order-001", "customerId": "cust-001", "amount": 149.99}`.
+- **Idempotent**, one DynamoDB call per request:
+
+  | Request | Result |
+  |---|---|
+  | new order | `201 created` |
+  | same order, same `idempotencyKey` (a retry) | `200 duplicate` |
+  | same order, new `idempotencyKey` | `409 conflict` |
+  | cancel | `200 cancelled`: the item stays, with `status: CANCELLED` |
+  | cancel again | `200 already_cancelled` |
+  | create an order that was cancelled | `409 discarded` |
+  | invalid payload | `400 invalid` |
+  | someone else's order | `403 forbidden` |
+
+- **Invocation metadata** is stored with every order, read from the real invocation, never
+  from the payload: `source`, `requestId` (API request ID or EventBridge event ID), `clientIp`
+  (REST only, EventBridge does not provide one), `userAgent`, `receivedAt`, `invocationId`, `invocation`.
+- **Authentication** (REST only): a Lambda authorizer checks `Authorization: Bearer <token>`.
+  The Lambda acts as the customer in the token, not the `customerId` in the body. Locally,
+  `./make-token.sh cust-001` prints a token signed with the secret in `env.json`.
 
 ```bash
-cd sam
+cd orders-test
+npm install
+docker compose up -d                 # DynamoDB Local + table orders-local
 
-# Invoke once with a saved event. The return value goes to stdout, the logs to stderr.
-sam local invoke HelloFunction -e events/hello.json
-sam local invoke QueueWorkerFunction -e events/sqs-orders.json
+# The whole flow, step by step, with every response checked:
+go run ./tools test eventbridge      # sam local invoke with events/*.json
+go run ./tools test api              # sam local start-api on :3050, then curl
+go run ./tools test api -step        # pause before each step
 
-# Override a template parameter for one run: the 89.90 order is now over the limit.
-sam local invoke CreateOrderFunction -e events/create-order.json --parameter-overrides MaxOrderTotal=50
+# Or by hand:
+npm run build
+sam local invoke OrderFunction -e events/01-create-order.json
+sam local start-api                  # http://127.0.0.1:3050
+curl -X POST http://127.0.0.1:3050/orders -H "Authorization: Bearer $(./make-token.sh cust-001)" \
+  -d "$(jq -c .detail events/01-create-order.json)"
+./show-table.sh                      # what is in DynamoDB
+./clean-table.sh                     # remove every item
 
-# Generate an event instead of writing one, and pipe it in.
-sam local generate-event apigateway http-api-proxy --method POST --path /orders \
-  --body '{"orderId": "o-1", "customerId": "c-1", "total": 5, "items": [{"sku": "A", "qty": 1}]}' \
-  | sam local invoke CreateOrderFunction -e -
-
-# Serve the HTTP API on localhost:3300 (also `make sam-api`). Code edits apply on the next request.
-sam local start-api
-curl 'localhost:3300/hello?name=Ada'
-curl localhost:3300/orders -H 'Content-Type: application/json' \
-  -d '{"orderId": "o-1", "customerId": "c-1", "total": 5, "items": [{"sku": "A", "qty": 1}]}'
-
-# Emulate the Lambda API on localhost:3301, for tests that invoke functions through an SDK or the
-# AWS CLI. Any credentials work, e.g. AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test.
-sam local start-lambda
-aws lambda invoke --endpoint-url http://127.0.0.1:3301 --region eu-central-1 \
-  --function-name QueueWorkerFunction --cli-binary-format raw-in-base64-out \
-  --payload file://events/sqs-orders.json out.json
+npm test                             # unit tests
 ```
 
 Good to know:
 
-- `env.json` raises `LOG_LEVEL` to `DEBUG`, so locally every function logs the event it received.
-  It can only override variables the template declares.
-- No `sam build` is needed: the functions have no dependencies, so `sam local` runs `src/` directly.
-  Once you add a `requirements.txt` you have to run `sam build`. After that, `sam local` uses
-  `.aws-sam/build` and won't see source edits until you build again.
-- `sam local generate-event sqs receive-message --body ...` inserts the body into its JSON
-  without escaping it, so escape the quotes: `--body '{\"orderId\": \"o-1\"}'`.
-- Port 3300 taken? Use `SAM_API_PORT=3400 make sam-test` or `sam local start-api --port 3400`.
+- Your AWS profile is not used: the Go runner and the scripts pass dummy credentials, so an
+  expired SSO session doesn't get in the way. By hand, `export AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local; unset AWS_PROFILE`.
+- `samconfig.toml` sets the local defaults: region, `env.json`, the `lambda-test` Docker network
+  (so the Lambda reaches `dynamodb-local:8000`), port 3050 and an x86_64 build. In AWS the
+  functions run on arm64, and `AuthSecret` has no default, so a deploy must pass a real secret.
+- `env.json` can only override variables that `template.yaml` declares.
+- `./generate-events.sh` rewrites `events/*.json` from `sam local generate-event`.
+- Locally, `sam local start-api` fills in placeholders: user agent `Custom User Agent String`,
+  account `123456789012`, and it can repeat the same `requestId`. Real API Gateway sends real values.
 
 ## Using it from your own project
 
@@ -204,7 +213,6 @@ starts a throwaway LocalStack per test run. Pass the same auth token through `LO
   is missing or invalid. Check `.env`.
 - **`make up` reports the container unhealthy:** an init script failed. Run `make logs` and
   look for `Error while running script`.
-- **Lambda stays `Pending` or fails to invoke:** Lambda functions run as sibling Docker
-  containers, which needs `/var/run/docker.sock` mounted (already done in
-  `docker-compose.yml`). The first start pulls the Python runtime image, so it takes longer.
 - **Port 4566 already in use:** another LocalStack is probably running. Check with `docker ps`.
+- **`orders-test`: port 3050 or 8000 already in use:** run the API on another port with
+  `go run ./tools test api -port 3060`; for 8000, stop the other DynamoDB Local.

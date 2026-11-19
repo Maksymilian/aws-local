@@ -3,12 +3,10 @@
 # (see https://docs.localstack.cloud/aws/capabilities/config/initialization-hooks/).
 # Provisions the resources of a tiny "orders" app that the examples use:
 #
-#   S3 demo-bucket/incoming/*.json ──▶ Lambda order-processor ──▶ DynamoDB orders
-#                                                │
-#                                                ▼
-#                                     SNS order-events ──▶ SQS billing-queue  (all events)
-#                                                     └──▶ SQS shipping-queue (OrderPlaced only)
-#
+#   S3 demo-bucket
+#   SNS order-events ──▶ SQS billing-queue  (all events)
+#                   └──▶ SQS shipping-queue (OrderPlaced only)
+#   DynamoDB orders (GSI customerId-index)
 #   SQS orders-queue (redrives to orders-dlq after 2 failed receives)
 #   EventBridge demo-bus, rule high-value-orders ──▶ SQS order-audit-queue
 #   Secrets Manager demo/db-credentials, SSM /demo/config/*
@@ -70,32 +68,5 @@ create events put-rule --name high-value-orders --event-bus-name demo-bus \
     }'
 create events put-targets --rule high-value-orders --event-bus-name demo-bus \
   --targets "Id=audit-queue,Arn=$(queue_arn order-audit-queue)"
-
-echo "==> Lambda triggered by S3 uploads"
-# IAM isn't enforced by default in LocalStack, but the role has to exist like it would in AWS.
-ROLE_ARN=$(awslocal iam create-role --role-name order-processor-role \
-  --assume-role-policy-document '{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
-      "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]}' \
-  --query Role.Arn --output text)
-
-python3 -m zipfile -c /tmp/order-processor.zip /opt/lambda/order_processor/handler.py
-create lambda create-function --function-name order-processor \
-  --runtime python3.13 --handler handler.handler --timeout 30 \
-  --role "$ROLE_ARN" \
-  --zip-file fileb:///tmp/order-processor.zip \
-  --environment "Variables={ORDERS_TABLE=orders,ORDER_EVENTS_TOPIC_ARN=${TOPIC_ARN}}"
-awslocal lambda wait function-active-v2 --function-name order-processor
-
-LAMBDA_ARN=$(awslocal lambda get-function --function-name order-processor \
-  --query Configuration.FunctionArn --output text)
-create s3api put-bucket-notification-configuration --bucket demo-bucket \
-  --notification-configuration "$(printf '{"LambdaFunctionConfigurations": [{
-      "LambdaFunctionArn": "%s",
-      "Events": ["s3:ObjectCreated:*"],
-      "Filter": {"Key": {"FilterRules": [
-        {"Name": "prefix", "Value": "incoming/"},
-        {"Name": "suffix", "Value": ".json"}
-      ]}}
-    }]}' "$LAMBDA_ARN")"
 
 echo "==> Done. Resources are ready."
