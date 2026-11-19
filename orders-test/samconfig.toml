@@ -1,16 +1,23 @@
-# Local defaults, so `sam build` / `sam local invoke` need no extra flags.
+# Local-only defaults, so `sam build` / `sam local invoke` / `sam local start-api` need no extra flags.
+# The parameter overrides (x86_64 build, public dev AuthSecret) are set only for those commands,
+# never in [default.global.parameters], so `sam deploy` does not pick them up: a deploy uses
+# arm64 and must pass a real secret, e.g. --parameter-overrides AuthSecret=<from Secrets Manager>.
 version = 0.1
 
 [default.global.parameters]
 region = "eu-central-1"
+
+[default.build.parameters]
 parameter_overrides = "Architecture=x86_64 AuthSecret=local-dev-secret-not-for-production"
 
 [default.local_invoke.parameters]
+parameter_overrides = "Architecture=x86_64 AuthSecret=local-dev-secret-not-for-production"
 env_vars = "env.json"
 docker_network = "lambda-test"
 add_host = ["host.docker.internal:host-gateway"]
 
 [default.local_start_api.parameters]
+parameter_overrides = "Architecture=x86_64 AuthSecret=local-dev-secret-not-for-production"
 port = 3050   # 3000-3003 are taken on this machine
 env_vars = "env.json"
 docker_network = "lambda-test"

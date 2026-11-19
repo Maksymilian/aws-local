@@ -1,4 +1,4 @@
-name: local-stack
+name: aws-local
 
 services:
   localstack:
@@ -14,9 +14,7 @@ services:
       DEBUG: ${DEBUG:-0}
     volumes:
       - ./init/ready.d:/etc/localstack/init/ready.d:ro   # provisioning scripts run on startup
-      - ./lambda:/opt/lambda:ro                          # Lambda sources deployed by the init hook
       - localstack-data:/var/lib/localstack
-      - /var/run/docker.sock:/var/run/docker.sock        # Lambda functions run as sibling containers
     healthcheck:
       # Healthy only once the init hooks finished provisioning without errors
       # ("completed" is true even when a script failed, hence the second check).
