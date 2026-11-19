@@ -1,0 +1,15 @@
+{
+  "id": "662f08f8-9857-45aa-a579-82290c76f2cb",
+  "detail-type": "CancelOrder",
+  "source": "orders.local",
+  "account": "123456789012",
+  "time": "2026-11-19T14:43:27Z",
+  "region": "eu-central-1",
+  "resources": [],
+  "detail": {
+    "idempotencyKey": 2,
+    "orderId": "order-001",
+    "customerId": "cust-001",
+    "reason": "changed my mind"
+  }
+}

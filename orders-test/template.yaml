@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Orders Lambda (TypeScript) - one handler for CreateOrder and CancelOrder, triggered by EventBridge and a REST API
+
+Parameters:
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues: [arm64, x86_64]
+    Description: Use x86_64 for local runs on an x86 machine (see samconfig.toml)
+  OrdersTableName:
+    Type: String
+    Default: orders-local
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [!Ref Architecture]  # arm64 (Graviton) in AWS: cheaper per ms
+    MemorySize: 512                     # more memory = more CPU = faster cold starts
+    Timeout: 10
+    Environment:
+      Variables:
+        # Overridden locally by env.json. Every variable must be listed here.
+        APP_ENV: prod
+        LOG_LEVEL: INFO
+        ORDERS_TABLE: !Ref OrdersTableName
+        DYNAMODB_ENDPOINT: ""
+        PAYMENT_API_URL: ""
+
+Resources:
+  OrdersApi:
+    Type: AWS::Serverless::Api   # REST API (API Gateway v1)
+    Properties:
+      StageName: local
+
+  OrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handler.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:UpdateItem]
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${OrdersTableName}
+      Events:
+        OrderEvents:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [orders.local]
+              detail-type: [CreateOrder, CancelOrder]
+        CreateOrderApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OrdersApi
+            Path: /orders
+            Method: post
+        CancelOrderApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OrdersApi
+            Path: /orders/{orderId}/cancel
+            Method: post
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: esm
+        OutExtension: [.js=.mjs]
+        Target: es2022
+        Minify: true
+        Sourcemap: false
+        EntryPoints: [src/handler.js]
+        # Bundling the SDK (instead of using the runtime's copy) lets esbuild
+        # tree-shake it: smaller package, faster cold start.
+        External: []
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
