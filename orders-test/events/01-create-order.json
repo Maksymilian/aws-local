@@ -1,0 +1,15 @@
+{
+  "id": "9992ec2f-8d6e-4bce-8015-af9e6197a34f",
+  "detail-type": "CreateOrder",
+  "source": "orders.local",
+  "account": "123456789012",
+  "time": "2026-11-19T14:43:27Z",
+  "region": "eu-central-1",
+  "resources": [],
+  "detail": {
+    "idempotencyKey": 1,
+    "orderId": "order-001",
+    "customerId": "cust-001",
+    "amount": 149.99
+  }
+}

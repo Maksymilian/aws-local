@@ -1,0 +1,345 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+)
+
+type runner struct {
+	step bool
+	port int
+	n    int
+}
+
+// localEnv: dummy credentials so SAM never tries to refresh an AWS SSO session,
+// and the project's esbuild on PATH for `sam build`.
+func localEnv() []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "AWS_PROFILE=") && !strings.HasPrefix(e, "PATH=") {
+			env = append(env, e)
+		}
+	}
+	bin, _ := filepath.Abs("node_modules/.bin")
+	return append(env,
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AWS_ACCESS_KEY_ID=local", "AWS_SECRET_ACCESS_KEY=local",
+		"AWS_DEFAULT_REGION=eu-central-1", "SAM_CLI_TELEMETRY=0",
+	)
+}
+
+func (r *runner) title(s string) {
+	fmt.Printf("\n%s\n>>> %d. %s\n%s\n", strings.Repeat("=", 66), r.n, s, strings.Repeat("=", 66))
+	r.n++
+	if r.step {
+		fmt.Print("press Enter...")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+}
+
+// sh runs a command with output streamed to the terminal.
+func sh(name string, args ...string) error {
+	fmt.Println(strings.TrimSpace("$ " + name + " " + strings.Join(args, " ")))
+	cmd := exec.Command(name, args...)
+	cmd.Env = localEnv()
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
+// shQuiet runs a command and only shows its output if it fails.
+func shQuiet(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Env = localEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
+	}
+	return nil
+}
+
+// The simple table operations live in Bash scripts; Go just calls them.
+func cleanTable() error { return sh("./clean-table.sh") }
+func showTable() error  { return sh("./show-table.sh") }
+
+// setup: DynamoDB up, table created, Lambda built, table empty.
+func (r *runner) setup() error {
+	if err := sh("docker", "compose", "up", "-d", "--wait", "dynamodb-local"); err != nil {
+		return err
+	}
+	_ = shQuiet("docker", "compose", "up", "dynamodb-init") // "table already exists" is fine
+	fmt.Println("$ sam build")
+	if err := shQuiet("sam", "build"); err != nil {
+		return err
+	}
+	return cleanTable()
+}
+
+// invoke runs the Lambda with an EventBridge event file and prints its response.
+func (r *runner) invoke(file string) error {
+	fmt.Printf("$ sam local invoke OrderFunction -e events/%s\n", file)
+	cmd := exec.Command("sam", "local", "invoke", "OrderFunction", "-e", "events/"+file)
+	cmd.Env = localEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("invoke %s: %w\n%s", file, err, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	fmt.Printf("%s\n\n", lines[len(lines)-1])
+	return nil
+}
+
+func (r *runner) eventBridgeFlow() error {
+	steps := []struct {
+		title string
+		run   func() error
+	}{
+		{"Start DynamoDB, build, start from an empty table", r.setup},
+		{"Create order-001 (idempotencyKey 1)", func() error { return r.invoke("01-create-order.json") }},
+		{"Check DynamoDB: order-001 exists", showTable},
+		{"Cancel order-001 (idempotencyKey 2)", func() error { return r.invoke("02-cancel-order.json") }},
+		{"Check DynamoDB: order-001 kept, status CANCELLED", showTable},
+		{"Create cancelled order-001 again (idempotencyKey 3) -> discarded", func() error { return r.invoke("03-create-order-again.json") }},
+		{"Check DynamoDB: order-001 still CANCELLED", showTable},
+		{"Same create twice: resend idempotencyKey 3", func() error { return r.invoke("04-create-order-duplicate.json") }},
+		{"Same orderId, new idempotencyKey 4 -> 409", func() error { return r.invoke("05-create-order-conflict.json") }},
+		{"Missing orderId -> 400", func() error { return r.invoke("06-missing-order-id.json") }},
+		{"Missing customerId -> 400", func() error { return r.invoke("07-missing-customer-id.json") }},
+		{"Check DynamoDB: still exactly one order", showTable},
+		{"Remove everything", func() error {
+			if err := cleanTable(); err != nil {
+				return err
+			}
+			return showTable()
+		}},
+	}
+	for _, s := range steps {
+		r.title(s.title)
+		if err := s.run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *runner) apiFlow() error {
+	api := fmt.Sprintf("http://127.0.0.1:%d", r.port)
+
+	r.title("Start DynamoDB, build, start the local API Gateway, empty the table")
+	if err := r.setup(); err != nil {
+		return err
+	}
+	stop, err := startAPI(r.port)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	fmt.Printf("local API Gateway on %s (log: .start-api.log)\n", api)
+
+	// post sends body as the customer `as` ("" = no Authorization header) and
+	// fails the run unless the response has the expected HTTP status and "result".
+	post := func(as, path, body string, wantStatus int, wantResult string) func() error {
+		return func() error {
+			req, err := http.NewRequest(http.MethodPost, api+path, strings.NewReader(body))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			auth := "(no token)"
+			if as != "" {
+				token, err := makeToken(as)
+				if err != nil {
+					return err
+				}
+				req.Header.Set("Authorization", "Bearer "+token)
+				auth = "token for " + as
+			}
+			fmt.Printf("$ curl -X POST %s%s [%s] -d '%s'\n", api, path, auth, body)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			fmt.Printf("%s\n  HTTP %d\n\n", b, resp.StatusCode)
+			var got struct {
+				Result string `json:"result"`
+			}
+			_ = json.Unmarshal(b, &got)
+			if resp.StatusCode != wantStatus || got.Result != wantResult {
+				return fmt.Errorf("POST %s: want HTTP %d %q, got HTTP %d %q",
+					path, wantStatus, wantResult, resp.StatusCode, got.Result)
+			}
+			return nil
+		}
+	}
+
+	// Same input as the EventBridge flow: the body is the event's "detail".
+	// Event-file steps act as the customer named in the event (cust-001 when it
+	// names none), so the token always matches the body.
+	create := func(file string, wantStatus int, wantResult string) func() error {
+		return func() error {
+			body, d, err := eventDetail(file)
+			if err != nil {
+				return err
+			}
+			return post(d.caller(), "/orders", body, wantStatus, wantResult)()
+		}
+	}
+	cancel := func(file string, wantStatus int, wantResult string) func() error {
+		return func() error {
+			body, d, err := eventDetail(file)
+			if err != nil {
+				return err
+			}
+			return post(d.caller(), "/orders/"+d.OrderID+"/cancel", body, wantStatus, wantResult)()
+		}
+	}
+
+	steps := []struct {
+		title string
+		run   func() error
+	}{
+		// Ordered so each outcome is really reached: duplicate and conflict need an
+		// active order, discarded needs a cancelled one.
+		{"Create order-001 (idempotencyKey 1) -> 201 created", create("01-create-order.json", 201, "created")},
+		{"Check DynamoDB: order-001 exists, clientIp is stored", showTable},
+		{"Same create twice: resend idempotencyKey 1 -> 200 duplicate", create("01-create-order.json", 200, "duplicate")},
+		{"Same orderId, new idempotencyKey 4 -> 409 conflict", create("05-create-order-conflict.json", 409, "conflict")},
+		{"Missing orderId -> 400 invalid", create("06-missing-order-id.json", 400, "invalid")},
+		{"No customerId in body -> taken from the token, 201 created (order-003)", create("07-missing-customer-id.json", 201, "created")},
+		// Authentication (REST only)
+		{"No token -> 401 from the authorizer", post("", "/orders/order-001/cancel", `{"idempotencyKey":7}`, 401, "")},
+		{"cust-999 cancels cust-001's order -> 403 forbidden", post("cust-999", "/orders/order-001/cancel", `{"idempotencyKey":7}`, 403, "forbidden")},
+		{"cust-999 claims to be cust-001 in the body -> 403 forbidden", post("cust-999", "/orders/order-001/cancel", `{"idempotencyKey":7,"customerId":"cust-001"}`, 403, "forbidden")},
+		{"Cancel order-001 (idempotencyKey 2) -> 200 cancelled", cancel("02-cancel-order.json", 200, "cancelled")},
+		{"Check DynamoDB: order-001 kept, status CANCELLED", showTable},
+		{"Cancel again -> 200 already_cancelled", cancel("02-cancel-order.json", 200, "already_cancelled")},
+		{"Create cancelled order-001 again (idempotencyKey 3) -> 409 discarded", create("03-create-order-again.json", 409, "discarded")},
+		{"Check DynamoDB: order-001 still CANCELLED, order-003 CREATED", showTable},
+		{"Remove everything", func() error {
+			if err := cleanTable(); err != nil {
+				return err
+			}
+			return showTable()
+		}},
+	}
+	for _, s := range steps {
+		r.title(s.title)
+		if err := s.run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startAPI runs `sam local start-api` in the background and waits until it listens.
+// The returned func stops it (and the Lambda containers it spawned).
+func startAPI(port int) (func(), error) {
+	logFile, err := os.Create(".start-api.log")
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("sam", "local", "start-api", "--port", fmt.Sprint(port), "--warm-containers", "EAGER")
+	cmd.Env = localEnv()
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own process group, killed as a whole
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan struct{}) // closed when sam exits
+	go func() { _ = cmd.Wait(); close(done) }()
+	stop := func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		<-done
+		_ = logFile.Close()
+	}
+
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		log, _ := os.ReadFile(".start-api.log")
+		switch {
+		case bytes.Contains(log, []byte("Running on")):
+			return stop, nil
+		case bytes.Contains(log, []byte("Address already in use")):
+			stop()
+			return nil, fmt.Errorf("port %d is in use, pick another with -port", port)
+		}
+		select {
+		case <-done:
+			return nil, fmt.Errorf("sam local start-api exited, see .start-api.log")
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	stop()
+	return nil, fmt.Errorf("sam local start-api did not start within 3 minutes")
+}
+
+type detailIDs struct {
+	OrderID    string `json:"orderId"`
+	CustomerID string `json:"customerId"`
+}
+
+func (d detailIDs) caller() string {
+	if d.CustomerID != "" {
+		return d.CustomerID
+	}
+	return "cust-001"
+}
+
+// eventDetail returns the "detail" of events/<file> as compact JSON, plus its IDs.
+func eventDetail(file string) (string, detailIDs, error) {
+	var d detailIDs
+	raw, err := os.ReadFile(filepath.Join("events", file))
+	if err != nil {
+		return "", d, err
+	}
+	var ev struct {
+		Detail json.RawMessage `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		return "", d, fmt.Errorf("%s: %w", file, err)
+	}
+	_ = json.Unmarshal(ev.Detail, &d)
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, ev.Detail); err != nil {
+		return "", d, err
+	}
+	return buf.String(), d, nil
+}
+
+// makeToken builds the same token src/authorizer.js verifies, signed with the
+// local AUTH_SECRET from env.json and valid for one hour.
+func makeToken(customerID string) (string, error) {
+	raw, err := os.ReadFile("env.json")
+	if err != nil {
+		return "", err
+	}
+	var env struct {
+		Parameters struct {
+			AuthSecret string `json:"AUTH_SECRET"`
+		}
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Parameters.AuthSecret == "" {
+		return "", fmt.Errorf("env.json: Parameters.AUTH_SECRET missing")
+	}
+	claims, _ := json.Marshal(map[string]any{"sub": customerID, "exp": time.Now().Add(time.Hour).Unix()})
+	payload := base64.RawURLEncoding.EncodeToString(claims)
+	mac := hmac.New(sha256.New, []byte(env.Parameters.AuthSecret))
+	mac.Write([]byte(payload))
+	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}

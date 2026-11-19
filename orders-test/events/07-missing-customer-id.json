@@ -1,0 +1,14 @@
+{
+  "id": "ab0b3651-c1b5-4e14-a2ae-02047507c931",
+  "detail-type": "CreateOrder",
+  "source": "orders.local",
+  "account": "123456789012",
+  "time": "2026-11-19T14:43:27Z",
+  "region": "eu-central-1",
+  "resources": [],
+  "detail": {
+    "idempotencyKey": 6,
+    "orderId": "order-003",
+    "amount": 20.00
+  }
+}
